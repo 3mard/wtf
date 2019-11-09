@@ -40,6 +40,7 @@ import (
 	"github.com/wtfutil/wtf/modules/newrelic"
 	"github.com/wtfutil/wtf/modules/opsgenie"
 	"github.com/wtfutil/wtf/modules/pagerduty"
+	"github.com/wtfutil/wtf/modules/pocket"
 	"github.com/wtfutil/wtf/modules/power"
 	"github.com/wtfutil/wtf/modules/resourceusage"
 	"github.com/wtfutil/wtf/modules/rollbar"
@@ -256,6 +257,10 @@ func MakeWidget(
 	case "zendesk":
 		settings := zendesk.NewSettingsFromYAML(moduleName, moduleConfig, config)
 		widget = zendesk.NewWidget(app, pages, settings)
+	case "pocket":
+		settings := pocket.NewSettingsFromYAML(moduleName, moduleConfig, config)
+		widget = pocket.NewWidget(app, pages, settings)
+
 	default:
 		settings := unknown.NewSettingsFromYAML(moduleName, moduleConfig, config)
 		widget = unknown.NewWidget(app, settings)

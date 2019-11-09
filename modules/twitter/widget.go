@@ -37,6 +37,7 @@ func NewWidget(app *tview.Application, pages *tview.Pages, settings *Settings) *
 
 	widget.SetDisplayFunction(widget.Refresh)
 
+
 	widget.client = NewClient(settings)
 
 	widget.View.SetBorderPadding(1, 1, 1, 1)
