@@ -12,16 +12,14 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-const HelpText = `
- Keyboard commands for NewTextWidget:
-`
-
 type Widget struct {
 	view.ScrollableWidget
 	view.KeyboardWidget
 
-	settings *Settings
-	client   *Client
+	settings     *Settings
+	client       *Client
+	items        []Item
+	archivedView bool
 }
 
 func NewWidget(app *tview.Application, pages *tview.Pages, settings *Settings) *Widget {
@@ -30,39 +28,61 @@ func NewWidget(app *tview.Application, pages *tview.Pages, settings *Settings) *
 		ScrollableWidget: view.NewScrollableWidget(app, settings.common),
 		settings:         settings,
 		client:           NewClient(settings.consumerKey, "http://localhost"),
+		archivedView:     false,
 	}
 
 	widget.CommonSettings()
-
 	widget.View.SetInputCapture(widget.InputCapture)
-
 	widget.SetRenderFunction(widget.Render)
 	widget.View.SetScrollable(true)
 	widget.View.SetRegions(true)
 	widget.KeyboardWidget.SetView(widget.View)
+	widget.initializeKeyboardControls()
+	widget.Selected = -1
+	widget.SetItemCount(0)
 	return &widget
 }
 
 /* -------------------- Exported Functions -------------------- */
 
 func (widget *Widget) Render() {
-	// The last call should always be to the display function
+
 	widget.Redraw(widget.content)
 }
 
 func (widget *Widget) Refresh() {
+	if widget.client.accessToken == nil {
+		metaData, err := readMetaDataFromDisk()
+		if err != nil || metaData.AccessToken == nil {
+			widget.Redraw(widget.authorizeWorkFlow)
+			return
+		}
+		widget.client.accessToken = metaData.AccessToken
+	}
+
+	state := Unread
+	if widget.archivedView == true {
+		state = Read
+	}
+	response, err := widget.client.GetLinks(state)
+	if err != nil {
+		widget.SetItemCount(0)
+	}
+
+	widget.items = orderItemResponseByKey(response)
+	widget.SetItemCount(len(widget.items))
 	widget.Redraw(widget.content)
 }
 
 /* -------------------- Unexported Functions -------------------- */
 
-type PocketMetaData struct {
+type pocketMetaData struct {
 	AccessToken *string
 }
 
-func writeMetaDataToDisk(token PocketMetaData) error {
+func writeMetaDataToDisk(metaData pocketMetaData) error {
 
-	fileData, err := yaml.Marshal(token)
+	fileData, err := yaml.Marshal(metaData)
 	if err != nil {
 		return fmt.Errorf("Could not write token to disk %v", err)
 	}
@@ -79,9 +99,9 @@ func writeMetaDataToDisk(token PocketMetaData) error {
 	return err
 }
 
-func readMetaDataFromDisk() (PocketMetaData, error) {
+func readMetaDataFromDisk() (pocketMetaData, error) {
 	wtfConfigDir, err := cfg.WtfConfigDir()
-	var metaData PocketMetaData
+	var metaData pocketMetaData
 	if err != nil {
 		return metaData, err
 	}
@@ -98,6 +118,15 @@ func readMetaDataFromDisk() (PocketMetaData, error) {
 
 }
 
+/*
+	Authorization workflow is documented at https://getpocket.com/developer/docs/authentication
+	broken to 4 steps :
+		1- Obtain a platform consumer key from http://getpocket.com/developer/apps/new.
+		2- Obtain a request token
+		3- Redirect user to Pocket to continue authorization
+		4- Receive the callback from Pocket, this wont be used
+		5- Convert a request token into a Pocket access token
+*/
 func (widget *Widget) authorizeWorkFlow() (string, string, bool) {
 	title := widget.CommonSettings().Title
 
@@ -109,23 +138,23 @@ func (widget *Widget) authorizeWorkFlow() (string, string, bool) {
 			return title, err.Error(), true
 		}
 		widget.settings.requestKey = &requestToken
-		redirectURL := widget.client.CreateRedirectLink(requestToken)
+		redirectURL := widget.client.CreateAuthLink(requestToken)
 		content := fmt.Sprintf("Please click on %s to Authorize the app", redirectURL)
 		return title, content, true
 	}
 
 	if widget.settings.accessToken == nil {
-		accessToken, err := widget.client.getAccessToken(*widget.settings.requestKey)
+		accessToken, err := widget.client.GetAccessToken(*widget.settings.requestKey)
 		if err != nil {
 			logger.Log(err.Error())
-			redirectURL := widget.client.CreateRedirectLink(*widget.settings.requestKey)
+			redirectURL := widget.client.CreateAuthLink(*widget.settings.requestKey)
 			content := fmt.Sprintf("Please click on %s to Authorize the app", redirectURL)
 			return title, content, true
 		}
 		content := "Authorized"
 		widget.settings.accessToken = &accessToken
 
-		metaData := PocketMetaData{
+		metaData := pocketMetaData{
 			AccessToken: &accessToken,
 		}
 
@@ -142,16 +171,62 @@ func (widget *Widget) authorizeWorkFlow() (string, string, bool) {
 
 }
 
-func (widget *Widget) content() (string, string, bool) {
-	title := widget.CommonSettings().Title
-	if widget.settings.accessToken == nil {
-		metaData, err := readMetaDataFromDisk()
-		if err != nil || metaData.AccessToken == nil {
-			return widget.authorizeWorkFlow()
-		}
-		widget.settings.accessToken = metaData.AccessToken
+func (widget *Widget) toggleView() {
+	widget.archivedView = !widget.archivedView
+	widget.Refresh()
+}
+
+func (widget *Widget) openLink() {
+	sel := widget.GetSelected()
+	if sel >= 0 && widget.items != nil && sel < len(widget.items) {
+		item := &widget.items[sel]
+		utils.OpenFile(item.GivenURL)
+	}
+}
+
+func (widget *Widget) toggleLink() {
+	sel := widget.GetSelected()
+	action := Archive
+	if widget.archivedView == true {
+		action = ReAdd
 	}
 
-	content := "done" + *widget.settings.accessToken
-	return title, content, true
+	if sel >= 0 && widget.items != nil && sel < len(widget.items) {
+		item := &widget.items[sel]
+		_, err := widget.client.ModifyLink(action, item.ItemID)
+		if err != nil {
+			logger.Log(err.Error())
+		}
+	}
+
+	widget.Refresh()
+}
+
+func (widget *Widget) formatItem(item Item, isSelected bool) string {
+	foreColor, backColor := widget.settings.common.Colors.Text, widget.settings.common.Colors.Background
+	text := item.ResolvedTitle
+	if isSelected == true {
+		foreColor = widget.settings.common.Colors.HighlightFore
+		backColor = widget.settings.common.Colors.HighlightBack
+
+	}
+
+	return fmt.Sprintf("[%s:%s]%s[white]", foreColor, backColor, tview.Escape(text))
+}
+
+func (widget *Widget) content() (string, string, bool) {
+	title := widget.CommonSettings().Title
+	currentViewTitle := "Reading List"
+	if widget.archivedView == true {
+		currentViewTitle = "Archived list"
+	}
+
+	title = fmt.Sprintf("%s-%s", title, currentViewTitle)
+	content := ""
+
+	for i, v := range widget.items {
+		content += widget.formatItem(v, i == widget.Selected) + "\n"
+	}
+
+	return title, content, false
 }
